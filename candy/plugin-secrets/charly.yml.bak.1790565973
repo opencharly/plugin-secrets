@@ -1,5 +1,7 @@
+version: 2026.232.0520
 plugin-secrets:
     candy:
+        version: 2026.178.2100
         description: |-
             OUT-OF-TREE charly plugin serving the ENTIRE secrets subsystem — a standalone
             Go module (go.mod + main.go) that owns the credential store (Secret Service /
