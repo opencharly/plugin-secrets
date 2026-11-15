@@ -8,14 +8,6 @@ import (
 	"sync"
 )
 
-// knownServicePrefixes lists non-VNC service prefixes that use composite
-// keys in VncPasswords. Order matters: longer prefixes first for correct
-// matching when services share a common prefix.
-var knownServicePrefixes = []string{
-	"charly/secret/",
-	"charly/enc/",
-}
-
 // ConfigFileStore implements CredentialStore using the existing plaintext
 // credential maps in ~/.config/charly/config.yml. This is the fallback backend
 // for headless environments without a system keyring.
@@ -199,21 +191,30 @@ func PlaintextCredentialEntries(cfg *RuntimeConfig) []struct{ Service, Key, Valu
 	return entries
 }
 
-// parseCompositeKey splits a VncPasswords map key into (service, key).
-// Composite keys are "service/key" where service may contain slashes
-// (e.g., "charly/secret/my-key" -> service="charly/secret", key="my-key").
-// Non-composite keys are VNC passwords (e.g., "my-image" -> service=CredServiceVNC).
+// parseCompositeKey splits a VncPasswords map key into (service, key) — the ONE
+// composite-key split in the plugin.
+//
+// A composite key is "<service>/<key>" and the KEY IS THE LAST SEGMENT, for every
+// service: a service may itself contain slashes ("charly/secret/my-key" ->
+// service="charly/secret", key="my-key"; "charly/api-key/openrouter" ->
+// service="charly/api-key", key="openrouter"), while a credential key never does —
+// it is an env-var name or a candy-declared slug, and neither may contain "/".
+// Non-composite keys are bare VNC passwords ("my-image" -> service=CredServiceVNC).
+//
+// Last-slash is not a preference, it is the rule the rest of the tree already
+// builds these identities with: the shadow-index reader (command.go's
+// collectCredentialNames), sdk/deploykit's CollectCandySecretAccepts and
+// EnsureCandySecret, and plugin-deploy-pod's secretKeyForDep all take the last
+// segment as the key. A D-Bus Secret Service item's identity IS its (service,
+// username) attribute pair, so a split that disagrees with the writer's does not
+// merely rename a credential — it hides it. This function used to special-case two
+// hard-coded prefixes and cut every other service at the FIRST slash, which stored
+// "charly/api-key/<name>" as service="charly", key="api-key/<name>" and orphaned
+// every credential migrated or imported under the documented shared namespace
+// (opencharly/plugin-secrets#9).
 func parseCompositeKey(compositeKey string) (service, key string) {
-	// Check known multi-slash service prefixes first
-	for _, prefix := range knownServicePrefixes {
-		if after, ok := strings.CutPrefix(compositeKey, prefix); ok {
-			return strings.TrimSuffix(prefix, "/"), after
-		}
-	}
-	// No known prefix matched: if it contains a slash, treat as single-slash
-	// service/key (for future unknown services).
-	if before, after, ok := strings.Cut(compositeKey, "/"); ok {
-		return before, after
+	if idx := strings.LastIndex(compositeKey, "/"); idx >= 0 {
+		return compositeKey[:idx], compositeKey[idx+1:]
 	}
 	// No slash at all: it's a bare VNC key
 	return CredServiceVNC, compositeKey

@@ -17,8 +17,8 @@ import (
 
 // command.go is the command:secrets leg of this plugin — the externalized `charly
 // secrets …` CLI, ported OUT of charly's core (the deleted charly/secrets_cmd.go +
-// plugin_command_secrets.go) so the go-keyring credential store + the Secret Service
-// client no longer link into the core binary (the C2 dep-shed). It is the COMMAND-class
+// plugin_command_secrets.go) so neither the credential store nor its Secret Service
+// client links into the core binary (the C2 dep-shed). It is the COMMAND-class
 // companion of this same module's verb:credential store-backend verb.
 //
 // Dispatch contract (charly/provider_command_external.go dispatchExternalCommand): on
@@ -73,6 +73,7 @@ type SecretsCmdGroup struct {
 	Import         SecretsImportCmd        `cmd:"" help:"Import plaintext config + keyring credentials into the active store"`
 	List           SecretsListCmd          `cmd:"" help:"List all charly credentials in the active store"`
 	MigrateSecrets ConfigMigrateSecretsCmd `cmd:"migrate-secrets" help:"Migrate plaintext credentials from config.yml to system keyring"`
+	Prune          PruneSecretsCmd         `cmd:"" help:"Drop shadow-index entries whose credential no longer exists in any Secret Service collection"`
 	Set            SecretsSetCmd           `cmd:"" help:"Set a credential"`
 }
 
@@ -336,11 +337,15 @@ func collectCredentialNames() ([]struct{ Service, Key string }, error) {
 		out = append(out, struct{ Service, Key string }{service, key})
 	}
 	for _, entry := range cfg.KeyringKeys {
-		lastSlash := strings.LastIndex(entry, "/")
-		if lastSlash < 0 {
+		// Index entries are composite by construction ("service/key"); a slash-less one names no
+		// credential. parseCompositeKey is the ONE split, so the identity `list`/`export` print is
+		// the identity `get` resolves — the two disagreed for every two-segment service
+		// (opencharly/plugin-secrets#9).
+		if !strings.Contains(entry, "/") {
 			continue
 		}
-		add(entry[:lastSlash], entry[lastSlash+1:])
+		service, key := parseCompositeKey(entry)
+		add(service, key)
 	}
 	for _, e := range PlaintextCredentialEntries(cfg) {
 		add(e.Service, e.Key)

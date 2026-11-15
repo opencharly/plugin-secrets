@@ -8,8 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/zalando/go-keyring"
 )
 
 // KeyringState represents the detected state of the system keyring.
@@ -185,10 +183,7 @@ func keyringGetViaSSClient(service, key string) (string, error) {
 	}
 	defer c.close()
 
-	preferLabel := ""
-	if cfg, err := LoadRuntimeConfig(); err == nil {
-		preferLabel = cfg.KeyringCollectionLabel
-	}
+	preferLabel := keyringCollectionLabel()
 
 	item, _, err := c.findItemByAttrsAnyCollection(map[string]string{"service": service, "username": key}, preferLabel)
 	if err != nil {
@@ -221,11 +216,21 @@ func (k *KeyringStore) Set(service, key, value string) error {
 	}
 	ch := make(chan error, 1)
 	go func() {
-		ch <- keyring.Set(service, key, value)
+		c, err := newSSClient()
+		if err != nil {
+			ch <- fmt.Errorf("opening secret service: %w", err)
+			return
+		}
+		defer c.close()
+		ch <- keyringSetViaSSClient(c, service, key, value, keyringCollectionLabel())
 	}()
 	select {
 	case err := <-ch:
 		if err != nil {
+			if errors.Is(err, ErrSSInteractiveUnlockRequired) {
+				setKeyringState(KeyringLocked)
+				return &KeyringLockedError{op: "set", service: service, key: key}
+			}
 			return fmt.Errorf("keyring set %s/%s: %w", service, key, err)
 		}
 		return addKeyringIndex(service, key)
@@ -241,11 +246,23 @@ func (k *KeyringStore) Delete(service, key string) error {
 	}
 	ch := make(chan error, 1)
 	go func() {
-		ch <- keyring.Delete(service, key)
+		c, err := newSSClient()
+		if err != nil {
+			ch <- fmt.Errorf("opening secret service: %w", err)
+			return
+		}
+		defer c.close()
+		ch <- keyringDeleteViaSSClient(c, service, key, keyringCollectionLabel())
 	}()
 	select {
 	case err := <-ch:
-		if err != nil && !isKeyringNotFound(err) {
+		// A miss in every collection is not an error here: the index entry (if any) is drift, and
+		// dropping it is exactly what removeKeyringIndex is for.
+		if err != nil && !errors.Is(err, ErrSSNotFound) {
+			if errors.Is(err, ErrSSInteractiveUnlockRequired) {
+				setKeyringState(KeyringLocked)
+				return &KeyringLockedError{op: "delete", service: service, key: key}
+			}
 			return fmt.Errorf("keyring delete %s/%s: %w", service, key, err)
 		}
 		return removeKeyringIndex(service, key)
@@ -255,8 +272,58 @@ func (k *KeyringStore) Delete(service, key string) error {
 	}
 }
 
+// keyringCollectionLabel returns the operator's preferred Secret Service collection label ("" =
+// no preference). ONE reader, so the read, write and delete paths cannot disagree about the pin.
+func keyringCollectionLabel() string {
+	if cfg, err := LoadRuntimeConfig(); err == nil {
+		return cfg.KeyringCollectionLabel
+	}
+	return ""
+}
+
+// keyringSetViaSSClient stores one credential through the iteration-capable ssClient — the SAME
+// client the read path uses — so a write co-locates with the reads: it lands in the collection
+// resolveTargetCollection picks (the `default` alias, else the collection labelled
+// keyring_collection_label, else the first healthy unlocked one).
+//
+// The write path used to go through zalando/go-keyring, whose Linux provider resolves ONE
+// collection — `/org/freedesktop/secrets/collection/login` when it exists, else the `default`
+// alias path — and ignores `keyring_collection_label` entirely. `keyring_collection_label` is
+// documented as pinning charly to a collection, and it was honoured on READS ONLY: in a
+// multi-database setup (the case the config key exists for) a write landed in login/default
+// instead of the database the operator chose, and a credential living in any third collection
+// could not be found by Delete at all (opencharly/plugin-secrets#9).
+//
+// Attributes are {service, username}, the pair the read path searches on; the item label carries
+// the service name, matching what the previous client wrote. createItem(replace=true) keeps the
+// overwrite semantics `charly secrets set` has always had.
+func keyringSetViaSSClient(c ssOps, service, key, value, preferLabel string) error {
+	target, _, err := resolveTargetCollection(c, preferLabel)
+	if err != nil {
+		return err
+	}
+	_, err = c.createItem(target,
+		map[string]string{"service": service, "username": key},
+		[]byte(value), service, true)
+	return err
+}
+
+// keyringDeleteViaSSClient removes the credential WHEREVER it lives. Delete used the same
+// one-collection resolution as the old write path, and a not-found was indistinguishable from a
+// successful delete, so `charly secrets delete` on a credential stored in any other collection
+// printed "Deleted … from keyring", dropped its shadow-index entry, and left the item in the store
+// — the operator losing the only pointer to it (opencharly/plugin-secrets#9).
+func keyringDeleteViaSSClient(c ssOps, service, key, preferLabel string) error {
+	item, _, err := findItemByAttrsAcrossCollections(c,
+		map[string]string{"service": service, "username": key}, preferLabel)
+	if err != nil {
+		return err
+	}
+	return c.deleteItem(item)
+}
+
 // List returns all keys for a service from the shadow index.
-// The go-keyring library does not support listing, so we maintain
+// The Secret Service has no cheap list-by-service call, so we maintain
 // a key-name-only index in config.yml (no secret values stored).
 func (k *KeyringStore) List(service string) ([]string, error) {
 	cfg, err := LoadRuntimeConfig()
@@ -299,24 +366,13 @@ func IsKeyringLocked(err error) bool {
 	return err != nil && errors.As(err, &locked)
 }
 
-// isKeyringNotFound checks whether the error indicates the key was not found.
-// Accepts three forms of "not found":
-//   - ErrSSNotFound from our ssClient (authoritative miss across all
-//     reachable collections)
-//   - keyring.ErrNotFound from zalando/go-keyring (still used by Set/Delete)
-//   - any error whose message contains "secret not found" (legacy catchall
-//     for error strings from other layers)
+// isKeyringNotFound checks whether the error indicates the key was not found: ErrSSNotFound from
+// our ssClient, which is an AUTHORITATIVE miss — at least one collection was searched successfully
+// and none holds the item. A broken or locked collection reports ErrSSAllBroken /
+// ErrSSInteractiveUnlockRequired instead, so "the keyring could not be read" is never mistaken for
+// "the credential is absent".
 func isKeyringNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, ErrSSNotFound) {
-		return true
-	}
-	if errors.Is(err, keyring.ErrNotFound) {
-		return true
-	}
-	return strings.Contains(err.Error(), "secret not found")
+	return err != nil && errors.Is(err, ErrSSNotFound)
 }
 
 // addKeyringIndex adds a service/key entry to the shadow index in config.yml.

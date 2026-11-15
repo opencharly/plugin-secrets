@@ -112,9 +112,11 @@ func (c *ConfigMigrateSecretsCmd) Run() error {
 	}
 	fmt.Fprintf(os.Stderr, "Backed up config.yml to %s\n\n", backupPath)
 
-	// Migrate each credential
+	// Migrate each credential, tracking the ones that ACTUALLY reached the keyring. Only those
+	// may leave the plaintext map: deleting the plaintext of an entry whose write failed loses
+	// the credential outright, since nothing else holds it.
 	fmt.Fprintf(os.Stderr, "Migrating %d credential(s):\n", len(entries))
-	migrated := 0
+	migrated := make([]credID, 0, len(entries))
 	for _, e := range entries {
 		configKey := credentialConfigKey(e.Service, e.Key)
 		if err := keyring.Set(e.Service, e.Key, e.Value); err != nil {
@@ -122,24 +124,51 @@ func (c *ConfigMigrateSecretsCmd) Run() error {
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "  %-45s → keyring ✓\n", configKey)
-		migrated++
+		migrated = append(migrated, credID{service: e.Service, key: e.Key})
 	}
 
-	if migrated == 0 {
+	if len(migrated) == 0 {
 		fmt.Fprintln(os.Stderr, "\nNo credentials were migrated. Config unchanged.")
 		return nil
 	}
 
-	// Clear plaintext credential maps from config
-	cfg.VncPasswords = nil
-	if err := SaveRuntimeConfig(cfg); err != nil {
+	if err := stripMigratedPlaintext(migrated); err != nil {
 		fmt.Fprintf(os.Stderr, "\nWARNING: Failed to clear plaintext credentials from config: %v\n", err)
 		fmt.Fprintln(os.Stderr, "Credentials were copied to keyring but plaintext copies remain.")
 		return err
 	}
 
+	if left := len(entries) - len(migrated); left > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d credential(s) could NOT be migrated and keep their plaintext in config.yml.\n", left)
+	}
 	fmt.Fprintln(os.Stderr, "\nRemoved plaintext credentials from config.yml.")
 	fmt.Fprintln(os.Stderr, "Migration complete. To verify: charly secrets list")
 	fmt.Fprintf(os.Stderr, "To undo: cp %s %s\n", backupPath, configPath)
 	return nil
+}
+
+// credID names one credential identity as it crosses the config file: the (service, key) pair the
+// store resolves it by.
+type credID struct{ service, key string }
+
+// stripMigratedPlaintext deletes exactly the plaintext entries that reached the keyring, through
+// ONE read-modify-write over a FRESH load.
+//
+// The load must be fresh: `KeyringStore.Set` appends the credential to the keyring SHADOW INDEX and
+// persists config.yml on every migration step, so a `RuntimeConfig` captured before the loop holds
+// a `keyring_keys` slice that predates all of them. Saving that copy back rewrote the index to its
+// stale value and left every freshly migrated credential in the keyring with nothing pointing at
+// it — and because `list` and `export` read the index, the store then reported "no entries" over a
+// store that held them (measured on opencharly/plugin-secrets#9). Deleting only the migrated pairs
+// (rather than nil-ing the whole map) also keeps the plaintext of an entry whose keyring write
+// FAILED.
+func stripMigratedPlaintext(migrated []credID) error {
+	fresh, err := LoadRuntimeConfig()
+	if err != nil {
+		return fmt.Errorf("re-reading config.yml: %w", err)
+	}
+	for _, m := range migrated {
+		deleteConfigCredential(fresh, m.service, m.key)
+	}
+	return SaveRuntimeConfig(fresh)
 }

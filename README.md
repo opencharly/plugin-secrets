@@ -3,8 +3,10 @@
 Secrets and credentials for OpenCharly — the externalized secrets subsystem.
 
 The plugin owns the credential store (Secret Service / config-file backends) and
-the GPG `.secrets` surface, so `github.com/zalando/go-keyring` lives here, out of
-charly's core binary. It is served **out-of-process** — charly's loader fetches
+the GPG `.secrets` surface. It speaks the Secret Service directly over
+`github.com/godbus/dbus/v5` through one client shared by reads, writes and
+deletes — no keyring library is needed here or in charly's core, and
+`keyring_collection_label` pins all three. It is served **out-of-process** — charly's loader fetches
 this repo, host-builds the provider binary, and serves it over go-plugin gRPC (or
 runs the host-installed `/usr/lib/charly/plugins` binary on a project-less host).
 

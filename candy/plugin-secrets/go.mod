@@ -5,15 +5,15 @@ go 1.26.4
 require (
 	github.com/alecthomas/kong v1.15.0
 	github.com/godbus/dbus/v5 v5.2.2
-	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/term v0.43.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
+require github.com/stretchr/testify v1.11.1 // indirect
+
 require (
 	cuelang.org/go v0.16.1 // indirect
 	github.com/cockroachdb/apd/v3 v3.2.1 // indirect
-	github.com/danieljoos/wincred v1.2.3 // indirect
 	github.com/emicklei/proto v1.14.3 // indirect
 	github.com/fatih/color v1.15.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect

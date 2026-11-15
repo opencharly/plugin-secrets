@@ -1,7 +1,9 @@
 // Package secrets is the charly plugin serving the ENTIRE secrets subsystem — it owns the
-// credential store (Secret Service / config-file backends) + the GPG `.secrets` surface, so
-// github.com/zalando/go-keyring lives HERE, out of charly's core binary entirely (the C2 dep-shed
-// removed go-keyring from charly/go.mod). It is an importable dual-placement plugin — the SAME
+// credential store (Secret Service / config-file backends) + the GPG `.secrets` surface. That is
+// the C2 dep-shed: the Secret Service is spoken directly over github.com/godbus/dbus/v5 by this
+// package's own ssClient, so neither charly's core nor this plugin carries a keyring library —
+// reads, writes and deletes share that one client and the one collection-resolution
+// order. It is an importable dual-placement plugin — the SAME
 // NewProvider()/NewMeta()/CliMain compile INTO charly in-process when listed in compiled_plugins,
 // or cmd/serve serves them OUT-OF-PROCESS when they are not. It provides TWO capabilities:
 //
