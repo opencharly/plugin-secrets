@@ -4,8 +4,11 @@ plugin-secrets:
             OUT-OF-TREE charly plugin serving the ENTIRE secrets subsystem — a standalone
             Go module (go.mod + main.go) that owns the credential store (Secret Service /
             config-file backends, the iteration-capable godbus client) AND the GPG
-            `.secrets` surface, so github.com/zalando/go-keyring lives HERE, out of charly's
-            core binary entirely (the C2 dep-shed removed go-keyring from charly/go.mod).
+            `.secrets` surface. That is the C2 dep-shed: the Secret Service is spoken directly
+            over github.com/godbus/dbus/v5 through this package's own ssClient, so NEITHER
+            charly's core NOR this plugin carries a keyring library (go-keyring is in neither
+            go.mod). Reads, writes and deletes share that one client, so all three resolve the
+            collection the same way and all three honour `keyring_collection_label`.
             charly's loader fetches this candy's repo, go-builds the provider binary on the
             HOST, and serves it OUT-OF-PROCESS via LocalTransport — or runs the host-installed
             /usr/lib/charly/plugins binary on a project-less host. It provides TWO capabilities:

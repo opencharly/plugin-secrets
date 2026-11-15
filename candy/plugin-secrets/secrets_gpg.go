@@ -1321,7 +1321,7 @@ func (c *SecretsGpgSetupCmd) checkPrereqs() error {
 	// in KeePassXC). Without them gpg still works: gpg-agent simply prompts via
 	// the configured GUI/TTY pinentry instead of auto-retrieving. charly's own
 	// credential store does NOT use these at all — it speaks the Secret Service
-	// over D-Bus via the pure-Go go-keyring client. So a missing one is a note,
+	// directly over D-Bus, in pure Go. So a missing one is a note,
 	// never a setup failure (the old "install libsecret" hard-error was
 	// misleading — charly does not depend on libsecret).
 	optional := []struct{ name, cmdName, note string }{
